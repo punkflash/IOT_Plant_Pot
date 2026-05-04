@@ -6,8 +6,8 @@
 #include "DHT.h"
 
 // WiFi Configuration
-const char* ssid = "ThePromisedLAN";       // Change this
-const char* password = "SaturniaPyri357";  // Change this
+const char* ssid = "Bublik";       // Change this
+const char* password = "32707632";  // Change this
 
 // Pin Definitions
 #define DHTPIN 4
@@ -17,6 +17,7 @@ const char* password = "SaturniaPyri357";  // Change this
 #define PHOTORESISTOR_PIN 32
 #define LED_PIN 16
 #define BUZZER_PIN 25  // Changed from GPIO 17 to GPIO 25
+#define PUMP_PIN 26
 
 // Thresholds
 #define LIGHT_THRESHOLD 600
@@ -34,6 +35,10 @@ int g_waterValue = 0;
 int g_lightValue = 0;
 bool g_waterLow = false;
 bool g_buzzerActive = false;
+bool g_pumpActive = false;
+bool pumpAutoMode = true;  // Auto mode enabled by default
+unsigned long pumpStartTime = 0;  // Track when pump was turned on
+const unsigned long PUMP_RUN_TIME = 2000;  // Pump runs for 2 seconds (2000 ms)
 unsigned long lastWiFiCheck = 0;
 const unsigned long WIFI_CHECK_INTERVAL = 5000;  // Check WiFi every 5 seconds
 
@@ -47,6 +52,7 @@ const float ALPHA = 0.3;  // Smoothing factor (0.0-1.0, lower = more smoothing)
 // Settings variables
 int waterThreshold = 200;
 int lightThreshold = 600;
+int pumpThreshold = 100;  // Pump activates when water is below this level
 bool buzzerAlertEnabled = true;
 bool waterAlertEnabled = true;
 
@@ -67,6 +73,7 @@ void saveSettings() {
   JsonDocument doc;
   doc["waterThreshold"] = waterThreshold;
   doc["lightThreshold"] = lightThreshold;
+  doc["pumpThreshold"] = pumpThreshold;
   doc["buzzerAlertEnabled"] = buzzerAlertEnabled;
   doc["waterAlertEnabled"] = waterAlertEnabled;
   
@@ -104,6 +111,7 @@ void loadSettings() {
   
   waterThreshold = doc["waterThreshold"] | 200;
   lightThreshold = doc["lightThreshold"] | 600;
+  pumpThreshold = doc["pumpThreshold"] | 100;
   buzzerAlertEnabled = doc["buzzerAlertEnabled"] | true;
   waterAlertEnabled = doc["waterAlertEnabled"] | true;
   
@@ -120,16 +128,22 @@ void loadSettings() {
 
 void handleData() {
   JsonDocument doc;
-  doc["temperature"] = g_temperature;
-  doc["humidity"] = g_humidity;
+  float temperature = isnan(g_temperature) ? 0.0f : g_temperature;
+  float humidity = isnan(g_humidity) ? 0.0f : g_humidity;
+
+  doc["temperature"] = temperature;
+  doc["humidity"] = humidity;
   doc["water"] = g_waterValue;
   doc["light"] = g_lightValue;
   doc["water_low"] = g_waterLow;
   doc["buzzer"] = g_buzzerActive;
+  doc["pump"] = g_pumpActive;
+  doc["pump_auto_mode"] = pumpAutoMode;
   doc["buzzer_alert_enabled"] = buzzerAlertEnabled;
   doc["water_alert_enabled"] = waterAlertEnabled;
   doc["water_threshold"] = waterThreshold;
   doc["light_threshold"] = lightThreshold;
+  doc["pump_threshold"] = pumpThreshold;
   doc["led"] = digitalRead(LED_PIN);
   doc["ip"] = WiFi.localIP().toString();
 
@@ -186,6 +200,19 @@ void handleLightThreshold() {
   }
 }
 
+void handlePumpThreshold() {
+  if (server.hasArg("value")) {
+    pumpThreshold = server.arg("value").toInt();
+    Serial.print("Pump threshold updated to: ");
+    Serial.println(pumpThreshold);
+    saveSettings();
+    
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Missing value parameter");
+  }
+}
+
 void handleBuzzerToggle() {
   buzzerAlertEnabled = !buzzerAlertEnabled;
   saveSettings();
@@ -207,6 +234,24 @@ void handleWaterAlertToggle() {
   doc["water_alert"] = waterAlertEnabled;
   doc["status"] = waterAlertEnabled ? "Water alerts enabled" : "Water alerts disabled";
   
+  String json;
+  serializeJson(doc, json);
+  server.send(200, "application/json", json);
+}
+
+// Pump auto mode toggle
+void handlePumpAutoMode() {
+  pumpAutoMode = !pumpAutoMode;
+  // Turn off pump if switching to auto mode
+  if (pumpAutoMode) {
+    g_pumpActive = false;
+    digitalWrite(PUMP_PIN, LOW);
+  }
+
+  JsonDocument doc;
+  doc["pump_auto_mode"] = pumpAutoMode;
+  doc["status"] = pumpAutoMode ? "Auto Mode ON" : "Auto Mode OFF";
+
   String json;
   serializeJson(doc, json);
   server.send(200, "application/json", json);
@@ -342,6 +387,9 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
+  pinMode(PUMP_PIN, OUTPUT);
+  digitalWrite(PUMP_PIN, LOW);
+
   analogReadResolution(12); // значення 0–4095
 
   dht.begin();
@@ -413,8 +461,10 @@ void setup() {
   server.on("/led/auto", handleLEDauto);
   server.on("/settings/water", handleWaterThreshold);
   server.on("/settings/light", handleLightThreshold);
+  server.on("/settings/pump", handlePumpThreshold);
   server.on("/buzzer/toggle", handleBuzzerToggle);
   server.on("/water-alert/toggle", handleWaterAlertToggle);
+  server.on("/pump/auto-mode", handlePumpAutoMode);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("Web server started");
@@ -444,7 +494,8 @@ void loop() {
   }
 
   // Then read water sensor (most problematic)
-  int waterValue = readAverage(WATER_PIN);
+  int rawWaterValue = readAverage(WATER_PIN);
+  int waterValue = rawWaterValue;
   
   // Handle requests during wait
   for (int i = 0; i < 2; i++) {
@@ -467,6 +518,8 @@ void loop() {
   } else {
     if (smoothedTemperature > 0.0) {
       temperature = smoothedTemperature;  // Use last good value
+    } else {
+      temperature = 0.0;
     }
   }
   
@@ -475,6 +528,8 @@ void loop() {
   } else {
     if (smoothedHumidity > 0.0) {
       humidity = smoothedHumidity;  // Use last good value
+    } else {
+      humidity = 0.0;
     }
   }
   
@@ -486,6 +541,36 @@ void loop() {
   g_humidity = humidity;
   g_waterValue = waterValue;
   g_lightValue = lightValue;
+
+  // Pump control logic - only activate if auto mode is enabled and water is below threshold
+  if (pumpAutoMode) {
+    if (rawWaterValue < pumpThreshold && !g_pumpActive) {
+      // Start pump if not already running
+      g_pumpActive = true;
+      pumpStartTime = millis();
+      digitalWrite(PUMP_PIN, HIGH);
+      Serial.println("Pump: Starting 2-second run...");
+    } else if (g_pumpActive && (millis() - pumpStartTime >= PUMP_RUN_TIME)) {
+      // Stop pump after 2 seconds
+      g_pumpActive = false;
+      digitalWrite(PUMP_PIN, LOW);
+      Serial.println("Pump: 2 seconds completed, stopping.");
+    }
+    
+    // Also stop pump if water level is above threshold
+    if (rawWaterValue >= pumpThreshold && g_pumpActive) {
+      g_pumpActive = false;
+      digitalWrite(PUMP_PIN, LOW);
+      Serial.println("Pump: Water level restored, stopping.");
+    }
+  } else {
+    // In manual mode, keep pump off
+    if (g_pumpActive) {
+      g_pumpActive = false;
+      digitalWrite(PUMP_PIN, LOW);
+      Serial.println("Pump: Manual mode, stopping.");
+    }
+  }
 
   // Check for low water level (only if water alerts are enabled)
   g_waterLow = waterAlertEnabled && (waterValue < waterThreshold);
@@ -523,6 +608,12 @@ void loop() {
   Serial.print(" adc | Light: ");
   Serial.print(lightValue);
   Serial.println(" adc");
+
+  if (g_pumpActive) {
+    Serial.println("Pump: ON (water level is 0)");
+  } else {
+    Serial.println("Pump: OFF");
+  }
 
   // Control LED - automatically based on light threshold (no manual override)
   if (lightValue < lightThreshold) {
