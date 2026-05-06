@@ -429,7 +429,7 @@
     </div>
 
     <div class="alert" id="waterAlert">
-      ⚠️ WATER LEVEL LOW - Pump activated!
+      ⚠️ WATER LEVEL LOW! Please check your plant's water supply.
     </div>
 
     <div class="tabs">
@@ -551,6 +551,7 @@
           
           <div class="button-group">
             <button class="btn-toggle" id="pumpAutoMode" onclick="togglePumpAutoMode()">🤖 Auto Mode: --</button>
+            <button class="btn-primary" id="pumpPulseBtn" onclick="triggerPumpPulse()">💧 Pump for 2s</button>
           </div>
         </div>
       </div>
@@ -603,6 +604,13 @@
           if (pumpAutoModeBtn && data.pump_auto_mode !== undefined) {
             pumpAutoModeBtn.classList.toggle('on', data.pump_auto_mode);
             pumpAutoModeBtn.textContent = '🤖 Auto Mode: ' + (data.pump_auto_mode ? '✓ ON' : '✗ OFF');
+          }
+
+          const pumpPulseBtn = document.getElementById('pumpPulseBtn');
+          if (pumpPulseBtn) {
+            const isPulsing = !!data.pump_manual_running;
+            pumpPulseBtn.disabled = isPulsing;
+            pumpPulseBtn.textContent = isPulsing ? '💧 Pumping... (2s)' : '💧 Pump for 2s';
           }
           
           document.getElementById('espIP').textContent = data.ip;
@@ -692,6 +700,16 @@
           fetchData();
         })
         .catch(error => console.error('Error toggling pump auto mode:', error));
+    }
+
+    function triggerPumpPulse() {
+      fetch('/pump/pulse')
+        .then(response => response.json())
+        .then(data => {
+          showFeedback(data.status || 'Manual pump pulse started');
+          fetchData();
+        })
+        .catch(error => console.error('Error starting pump pulse:', error));
     }
 
     function showFeedback(message) {

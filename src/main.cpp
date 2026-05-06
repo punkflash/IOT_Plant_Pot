@@ -36,8 +36,10 @@ int g_lightValue = 0;
 bool g_waterLow = false;
 bool g_buzzerActive = false;
 bool g_pumpActive = false;
+bool g_manualPumpRunning = false;
 bool pumpAutoMode = true;  // Auto mode enabled by default
 unsigned long pumpStartTime = 0;  // Track when pump was turned on
+unsigned long manualPumpStartTime = 0;
 const unsigned long PUMP_RUN_TIME = 2000;  // Pump runs for 2 seconds (2000 ms)
 unsigned long lastWiFiCheck = 0;
 const unsigned long WIFI_CHECK_INTERVAL = 5000;  // Check WiFi every 5 seconds
@@ -138,6 +140,7 @@ void handleData() {
   doc["water_low"] = g_waterLow;
   doc["buzzer"] = g_buzzerActive;
   doc["pump"] = g_pumpActive;
+  doc["pump_manual_running"] = g_manualPumpRunning;
   doc["pump_auto_mode"] = pumpAutoMode;
   doc["buzzer_alert_enabled"] = buzzerAlertEnabled;
   doc["water_alert_enabled"] = waterAlertEnabled;
@@ -244,13 +247,37 @@ void handlePumpAutoMode() {
   pumpAutoMode = !pumpAutoMode;
   // Turn off pump if switching to auto mode
   if (pumpAutoMode) {
-    g_pumpActive = false;
-    digitalWrite(PUMP_PIN, LOW);
+    if (!g_manualPumpRunning) {
+      g_pumpActive = false;
+      digitalWrite(PUMP_PIN, LOW);
+    }
   }
 
   JsonDocument doc;
   doc["pump_auto_mode"] = pumpAutoMode;
   doc["status"] = pumpAutoMode ? "Auto Mode ON" : "Auto Mode OFF";
+
+  String json;
+  serializeJson(doc, json);
+  server.send(200, "application/json", json);
+}
+
+void handlePumpPulse() {
+  JsonDocument doc;
+
+  if (!g_manualPumpRunning) {
+    g_manualPumpRunning = true;
+    manualPumpStartTime = millis();
+    g_pumpActive = true;
+    digitalWrite(PUMP_PIN, HIGH);
+    Serial.println("Pump: Manual 2-second pulse started.");
+    doc["status"] = "Manual pump pulse started (2s)";
+  } else {
+    doc["status"] = "Pump pulse already running";
+  }
+
+  doc["pump"] = true;
+  doc["manual_pulse"] = true;
 
   String json;
   serializeJson(doc, json);
@@ -465,6 +492,7 @@ void setup() {
   server.on("/buzzer/toggle", handleBuzzerToggle);
   server.on("/water-alert/toggle", handleWaterAlertToggle);
   server.on("/pump/auto-mode", handlePumpAutoMode);
+  server.on("/pump/pulse", handlePumpPulse);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("Web server started");
@@ -542,8 +570,16 @@ void loop() {
   g_waterValue = waterValue;
   g_lightValue = lightValue;
 
+  // Keep manual pulse independent from auto mode logic.
+  if (g_manualPumpRunning && (millis() - manualPumpStartTime >= PUMP_RUN_TIME)) {
+    g_manualPumpRunning = false;
+    g_pumpActive = false;
+    digitalWrite(PUMP_PIN, LOW);
+    Serial.println("Pump: Manual 2 seconds completed, stopping.");
+  }
+
   // Pump control logic - only activate if auto mode is enabled and water is below threshold
-  if (pumpAutoMode) {
+  if (pumpAutoMode && !g_manualPumpRunning) {
     if (rawWaterValue < pumpThreshold && !g_pumpActive) {
       // Start pump if not already running
       g_pumpActive = true;
@@ -563,7 +599,7 @@ void loop() {
       digitalWrite(PUMP_PIN, LOW);
       Serial.println("Pump: Water level restored, stopping.");
     }
-  } else {
+  } else if (!g_manualPumpRunning) {
     // In manual mode, keep pump off
     if (g_pumpActive) {
       g_pumpActive = false;
